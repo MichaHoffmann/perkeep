@@ -23,6 +23,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -48,6 +49,36 @@ import (
 
 func init() {
 	testhooks.SetUseSHA1(true)
+}
+
+var w *test.World
+
+func TestMain(m *testing.M) {
+	flag.Parse()
+
+	if testing.Short() {
+		log.Println("Skipping FUSE tests in short mode")
+		os.Exit(0)
+	}
+	if os.Getenv("SKIP_FUSE_TESTS") != "" {
+		log.Println("Skipping FUSE tests because 'SKIP_FUSE_TESTS' is set")
+		os.Exit(0)
+	}
+	if !(runtime.GOOS == "darwin" || runtime.GOOS == "linux") {
+		log.Printf("Skipping FUSE tests on %s", runtime.GOOS)
+		os.Exit(0)
+	}
+
+	var err error
+	if w, err = test.NewWorld(); err != nil {
+		log.Fatal(err)
+	}
+	if err = w.Start(); err != nil {
+		log.Fatal(err)
+	}
+	defer w.Stop()
+
+	m.Run()
 }
 
 var (
@@ -128,7 +159,6 @@ func pkmountTest(t *testing.T, fn func(env *mountEnv)) {
 	log.SetOutput(dupLog)
 	defer log.SetOutput(os.Stderr)
 
-	w := test.GetWorld(t)
 	mountPoint := t.TempDir()
 	verbose := "false"
 	var stderrDest io.Writer = ioutil.Discard

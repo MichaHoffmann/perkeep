@@ -33,7 +33,7 @@ func TestFileSharing(t *testing.T) {
 // like TestFileSharing, but with a file large enough to have several parts,
 // including some bytesRef parts.
 func TestFileWithBytesSharing(t *testing.T) {
-	share(t, test.GetWorld(t).ServerBinary())
+	share(t, w.ServerBinary())
 }
 
 func TestDirSharing(t *testing.T) {
@@ -41,7 +41,6 @@ func TestDirSharing(t *testing.T) {
 }
 
 func share(t *testing.T, file string) {
-	w := test.GetWorld(t)
 	out := test.MustRunCmd(t, w.Cmd("pk-put", "file", file))
 	fileRef := strings.Split(out, "\n")[0]
 

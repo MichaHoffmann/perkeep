@@ -65,10 +65,6 @@ func (f *fakeFile) Sys() interface{}   { return nil }
 // TestUploadFile checks if uploading a file with the same content
 // but different metadata works, and whether camliType is set to "file".
 func TestUploadFile(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping in short mode")
-	}
-
 	ts := newTestServer(t)
 	defer ts.Close()
 

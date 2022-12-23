@@ -43,10 +43,8 @@ func parseJSON(s string) map[string]interface{} {
 }
 
 func TestSetNamed(t *testing.T) {
-	w := test.GetWorld(t)
 	// Needed to upload the owner public key
 	runCmd(t, w, "pk-put", "permanode")
-
 	runCmd(t, w, "pk", "named-search-set", "bar", "is:image and tag:bar")
 	gno := runCmd(t, w, "pk", "named-search-get", "bar")
 	gnr := parseJSON(gno)
@@ -56,8 +54,6 @@ func TestSetNamed(t *testing.T) {
 }
 
 func TestGetNamed(t *testing.T) {
-	w := test.GetWorld(t)
-
 	putExprCmd := w.Cmd("pk-put", "blob", "-")
 	putExprCmd.Stdin = strings.NewReader("is:pano")
 	ref, err := test.RunCmd(putExprCmd)
@@ -76,8 +72,6 @@ func TestGetNamed(t *testing.T) {
 }
 
 func TestNamedSearch(t *testing.T) {
-	w := test.GetWorld(t)
-
 	runCmd(t, w, "pk", "named-search-set", "favorite", "tag:cats")
 	pn := runCmd(t, w, "pk-put", "permanode", "-title", "Felix", "-tag", "cats")
 	_, lines, err := bufio.ScanLines([]byte(pn), false)
@@ -93,8 +87,6 @@ func TestNamedSearch(t *testing.T) {
 }
 
 func TestNestedNamedSearch(t *testing.T) {
-	w := test.GetWorld(t)
-
 	runCmd(t, w, "pk", "named-search-set", "favorite", "tag:cats")
 	runCmd(t, w, "pk", "named-search-set", "mybest", "named:favorite")
 	pn := runCmd(t, w, "pk-put", "permanode", "-title", "Felix", "-tag", "cats")

@@ -34,10 +34,11 @@ import (
 )
 
 // Test that running:
-//   $ pk-put permanode
+//
+//	$ pk-put permanode
+//
 // ... creates and uploads a permanode, and that we can pk-get it back.
 func TestCamputPermanode(t *testing.T) {
-	w := test.GetWorld(t)
 	br := w.NewPermanode(t)
 
 	out := test.MustRunCmd(t, w.Cmd("pk-get", br.String()))
@@ -56,7 +57,6 @@ func TestCamputPermanode(t *testing.T) {
 }
 
 func TestWebsocketQuery(t *testing.T) {
-	w := test.GetWorld(t)
 	pn := w.NewPermanode(t)
 	test.MustRunCmd(t, w.Cmd("pk-put", "attr", pn.String(), "tag", "foo"))
 
@@ -121,7 +121,6 @@ func TestWebsocketQuery(t *testing.T) {
 }
 
 func TestInternalHandler(t *testing.T) {
-	w := test.GetWorld(t)
 	tests := map[string]int{
 		"/":                                   200,
 		"/test-that-root-handler-returns-404": 404,
@@ -174,7 +173,6 @@ func mustWriteFile(t *testing.T, path, contents string) {
 // Run pk-put in the environment it runs in under the Android app.
 // This matches how pk-put is used in UploadThread.java.
 func TestAndroidCamputFile(t *testing.T) {
-	w := test.GetWorld(t)
 	// UploadThread.java sets:
 	//   CAMLI_AUTH (set by w.CmdWithEnv)
 	//   CAMLI_TRUSTED_CERT (not needed)

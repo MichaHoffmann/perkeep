@@ -53,7 +53,6 @@ func TestNonUTF8FileName(t *testing.T) {
 	}
 	fd.Close()
 
-	w := test.GetWorld(t)
 	out := test.MustRunCmd(t, w.Cmd("pk-put", "file", fd.Name()))
 	br := strings.Split(out, "\n")[0]
 
@@ -99,7 +98,6 @@ func TestNonUTF8SymlinkTarget(t *testing.T) {
 		t.Fatalf("os.Symlink(): %v", err)
 	}
 
-	w := test.GetWorld(t)
 	out := test.MustRunCmd(t, w.Cmd("pk-put", "file", filepath.Join(srcDir, "link")))
 	br := strings.Split(out, "\n")[0]
 

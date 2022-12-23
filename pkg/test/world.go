@@ -31,7 +31,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -50,11 +49,8 @@ type World struct {
 	tempDir string
 	gobin   string // where the World installs and finds binaries
 
-	addr string // "127.0.0.1:35"
-
-	server    *exec.Cmd
-	isRunning int32 // state of the perkeepd server. Access with sync/atomic only.
-	serverErr error
+	addr   string // "127.0.0.1:35"
+	server *exec.Cmd
 }
 
 // pkSourceRoot returns the root of the source tree, or an error.
@@ -93,6 +89,11 @@ func (w *World) Addr() string {
 // SourceRoot returns the root of the source tree.
 func (w *World) SourceRoot() string {
 	return w.srcRoot
+}
+
+// TempDir returns the temporary directory for this world.
+func (w *World) TempDir() string {
+	return w.tempDir
 }
 
 // Build builds the Perkeep binaries.
@@ -192,20 +193,14 @@ func (w *World) Start() error {
 		)
 
 		if err := w.server.Start(); err != nil {
-			w.serverErr = fmt.Errorf("starting perkeepd: %v", err)
-			return w.serverErr
+			return fmt.Errorf("starting perkeepd: %v", err)
 		}
 
-		atomic.StoreInt32(&w.isRunning, 1)
 		waitc := make(chan error, 1)
-		go func() {
-			err := w.server.Wait()
-			w.serverErr = fmt.Errorf("%v: %s", err, buf.String())
-			atomic.StoreInt32(&w.isRunning, 0)
-			waitc <- w.serverErr
-		}()
 		upc := make(chan bool)
 		upErr := make(chan error, 1)
+
+		go func() { waitc <- w.server.Wait() }()
 		go func() {
 			c, err := getPortListener.Accept()
 			if err != nil {
@@ -221,53 +216,45 @@ func (w *World) Start() error {
 			}
 			w.addr = strings.TrimSpace(addr)
 
-			for i := 0; i < 100; i++ {
-				res, err := http.Get("http://" + w.addr)
-				if err == nil {
-					res.Body.Close()
-					upc <- true
-					return
-				}
-				time.Sleep(50 * time.Millisecond)
+			if ok := WaitFor(func() bool { return w.Ping() == nil }, time.Minute, 1*time.Second); !ok {
+				upErr <- fmt.Errorf("server never became reachable")
+			} else {
+				upc <- true
 			}
-			w.serverErr = errors.New(buf.String())
-			atomic.StoreInt32(&w.isRunning, 0)
-			upErr <- fmt.Errorf("server never became reachable: %v", w.serverErr)
 		}()
 
 		select {
-		case <-waitc:
-			return fmt.Errorf("server exited: %v", w.serverErr)
+		case err := <-waitc:
+			return err
 		case err := <-upErr:
 			return err
 		case <-upc:
-			if err := w.Ping(); err != nil {
-				return err
-			}
 			// Success.
 		}
 	}
 	return nil
 }
 
-// Ping returns an error if the world's perkeepd is not running.
+// Ping returns an error if the world's perkeepd is not responding to http requests.
 func (w *World) Ping() error {
-	if atomic.LoadInt32(&w.isRunning) != 1 {
-		return fmt.Errorf("perkeepd not running: %v", w.serverErr)
+	res, err := http.Get(w.ServerBaseURL())
+	if err != nil {
+		return fmt.Errorf("unable to get %s: %w", w.addr, err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status: %s", res.Status)
 	}
 	return nil
 }
 
 func (w *World) Stop() {
-	if w == nil {
-		return
-	}
 	if err := w.server.Process.Kill(); err != nil {
-		log.Fatalf("killed failed: %v", err)
+		log.Printf("kill failed: %v", err)
 	}
-
-	if d := w.tempDir; d != "" {
-		os.RemoveAll(d)
+	if err := os.RemoveAll(w.tempDir); err != nil {
+		log.Printf("removing %s failed: %v", w.tempDir, err)
 	}
 }
 
@@ -334,32 +321,6 @@ func (w *World) CmdWithEnv(binary string, env []string, args ...string) *exec.Cm
 
 func (w *World) ServerBaseURL() string {
 	return fmt.Sprintf("http://" + w.addr)
-}
-
-var theWorld *World
-
-// GetWorld returns (creating if necessary) a test singleton world.
-// It calls Fatal on the provided test if there are problems.
-func GetWorld(t *testing.T) *World {
-	w := theWorld
-	if w == nil {
-		var err error
-		w, err = NewWorld()
-		if err != nil {
-			t.Fatalf("Error finding test world: %v", err)
-		}
-		err = w.Start()
-		if err != nil {
-			t.Fatalf("Error starting test world: %v", err)
-		}
-		theWorld = w
-	}
-	return w
-}
-
-// GetWorldMaybe returns the current World. It might be nil.
-func GetWorldMaybe(t *testing.T) *World {
-	return theWorld
 }
 
 // RunCmd runs c (which is assumed to be something short-lived, like a

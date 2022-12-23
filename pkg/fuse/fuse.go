@@ -30,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"go4.org/syncutil"
 	"perkeep.org/pkg/blob"
@@ -91,6 +92,8 @@ type pkNode struct {
 	cbr     blob.Ref
 	content []byte
 	refs    uint
+	lw      time.Time
+	lf      time.Time
 
 	// symlink
 	target []byte
@@ -125,8 +128,8 @@ var (
 	_ = (fs.NodeUnlinker)((*pkNode)(nil))
 	_ = (fs.NodeSymlinker)((*pkNode)(nil))
 	_ = (fs.NodeReadlinker)((*pkNode)(nil))
-	_ = (fs.NodeGetattrer)((*pkNode)(nil)) // TODO
-	_ = (fs.NodeSetattrer)((*pkNode)(nil)) // TODO
+	_ = (fs.NodeGetattrer)((*pkNode)(nil))
+	_ = (fs.NodeSetattrer)((*pkNode)(nil))
 	_ = (fs.NodeMkdirer)((*pkNode)(nil))
 	_ = (fs.NodeRenamer)((*pkNode)(nil))
 )
@@ -236,7 +239,7 @@ func (n *pkNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	}
 	child.populateAttrOut(&out.Attr)
 
-	return n.NewPersistentInode(ctx, child, fs.StableAttr{Mode: mode, Ino: child.br.Sum64()}), 0
+	return n.NewInode(ctx, child, fs.StableAttr{Mode: mode, Ino: child.br.Sum64()}), 0
 }
 
 func (n *pkNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
@@ -280,7 +283,7 @@ func (n *pkNode) Create(ctx context.Context, name string, flags uint32, mode uin
 	}
 	child.populateAttrOut(&out.Attr)
 
-	return n.NewPersistentInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG, Ino: child.br.Sum64()}), fh, fuse.FOPEN_DIRECT_IO, 0
+	return n.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG, Ino: child.br.Sum64()}), fh, fuse.FOPEN_DIRECT_IO, 0
 }
 
 func (n *pkNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
@@ -361,7 +364,7 @@ func (n *pkNode) Symlink(ctx context.Context, target, name string, out *fuse.Ent
 	}
 	child.populateAttrOut(&out.Attr)
 
-	return n.NewPersistentInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFLNK, Ino: child.br.Sum64()}), 0
+	return n.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFLNK, Ino: child.br.Sum64()}), 0
 }
 
 func (n *pkNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
@@ -387,6 +390,7 @@ func (n *pkNode) Setattr(ctx context.Context, _ fs.FileHandle, in *fuse.SetAttrI
 		n.resizeUnlocked(sz)
 	}
 	n.populateAttrOutUnlocked(&out.Attr)
+	n.lw = time.Now()
 	return 0
 }
 
@@ -433,7 +437,7 @@ func (n *pkNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 	}
 	child.populateAttrOut(&out.Attr)
 
-	return n.NewPersistentInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: child.br.Sum64()}), 0
+	return n.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: child.br.Sum64()}), 0
 }
 
 func (n *pkNode) Rmdir(ctx context.Context, name string) syscall.Errno {
@@ -520,6 +524,7 @@ func (fh *pkFileView) Write(_ context.Context, buf []byte, off int64) (uint32, s
 	}
 
 	copy(fh.n.content[off:], buf)
+	fh.n.lw = time.Now()
 	return uint32(sz), 0
 }
 
@@ -527,19 +532,8 @@ func (fh *pkFileView) Flush(ctx context.Context) syscall.Errno {
 	fh.n.mu.Lock()
 	defer fh.n.mu.Unlock()
 
-	// TODO: check that new content would be written. Is this really needed?
-	if fh.n.cbr.Valid() {
-		r, err := schema.NewFileReader(ctx, fh.n.pk.client, fh.n.cbr)
-		if err != nil {
-			return errnoFromErr(err)
-		}
-		content, err := io.ReadAll(r)
-		if err != nil {
-			return errnoFromErr(err)
-		}
-		if bytes.Equal(content, fh.n.content) {
-			return 0
-		}
+	if !fh.n.lw.IsZero() && fh.n.lw.Before(fh.n.lf) {
+		return 0
 	}
 
 	br, err := schema.WriteFileFromReader(ctx, fh.n.pk.client, fh.n.name, bytes.NewReader(fh.n.content))
@@ -551,6 +545,7 @@ func (fh *pkFileView) Flush(ctx context.Context) syscall.Errno {
 		return errnoFromErr(err)
 	}
 	fh.n.cbr = br
+	fh.n.lf = time.Now()
 	return 0
 }
 
@@ -572,6 +567,7 @@ func (n *pkNode) populateAttrOutUnlocked(out *fuse.Attr) {
 	out.Size = uint64(len(n.content))
 	out.Uid = uint32(os.Getuid())
 	out.Gid = uint32(os.Getgid())
+	out.Nlink = 1
 
 	switch n.Mode() {
 	case syscall.S_IFREG, syscall.S_IFLNK:

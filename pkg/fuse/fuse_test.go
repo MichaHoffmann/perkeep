@@ -21,7 +21,6 @@ package fuse
 
 import (
 	"bytes"
-	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -70,7 +69,7 @@ func TestMain(m *testing.M) {
 	}
 	defer w.Stop()
 
-	os.Exit(m.Run())
+	m.Run()
 }
 
 func TestPosix(t *testing.T) {
@@ -94,7 +93,7 @@ func TestPosix(t *testing.T) {
 
 func TestTruncateFile(t *testing.T) {
 	inEmptyRoot(t, func(env *mountEnv, rootDir string) {
-		f, err := ioutil.TempFile(rootDir, "camlitest")
+		f, err := ioutil.TempFile(rootDir, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -132,6 +131,46 @@ func TestTruncateFile(t *testing.T) {
 			t.Fatal(err)
 		}
 		if want := "hello perkeep"; string(got) != want {
+			t.Fatalf("file content = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestTruncateFileOnOpen(t *testing.T) {
+	inEmptyRoot(t, func(env *mountEnv, rootDir string) {
+		f, err := ioutil.TempFile(rootDir, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = f.WriteString("hello"); err != nil {
+			t.Fatal(err)
+		}
+		if err = f.Close(); err != nil {
+			t.Logf("error closing file %s: %s", f.Name(), err)
+		}
+
+		f, err = os.OpenFile(f.Name(), os.O_RDWR|os.O_TRUNC, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stat, err := f.Stat(); err != nil {
+			t.Fatal(err)
+		} else if stat.Size() != 0 {
+			t.Fatalf("file size = %d, want %d", stat.Size(), 0)
+		}
+
+		if _, err = f.Write([]byte("perkeep")); err != nil {
+			t.Fatal(err)
+		}
+		if err = f.Close(); err != nil {
+			t.Logf("error closing file %s: %s", f.Name(), err)
+		}
+
+		got, err := ioutil.ReadFile(f.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := "perkeep"; string(got) != want {
 			t.Fatalf("file content = %q, want %q", got, want)
 		}
 	})
@@ -523,8 +562,6 @@ end tell
 type mountEnv struct {
 	t          *testing.T
 	mountPoint string
-	process    *os.Process
-	world      *test.World
 }
 
 func exclusiveTestDir(t *testing.T) string {
@@ -550,7 +587,6 @@ func pkmountTest(t *testing.T, fn func(env *mountEnv)) {
 		t.Fatal(err)
 	}
 	mountPoint := t.TempDir()
-
 	mount := w.CmdWithEnv(
 		"pk-mountng",
 		os.Environ(),
@@ -561,64 +597,27 @@ func pkmountTest(t *testing.T, fn func(env *mountEnv)) {
 	if err := mount.Start(); err != nil {
 		t.Fatal(err)
 	}
-
-	waitc := make(chan error, 1)
-	go func() { waitc <- mount.Wait() }()
 	defer func() {
-		mount.Process.Signal(os.Interrupt)
-		select {
-		case <-time.After(5 * time.Second):
-			log.Printf("timeout waiting for pk-mountng to finish")
-			mount.Process.Kill()
-		case err := <-waitc:
-			log.Printf("pk-mountng exited: %v", err)
+		if err := exec.Command("umount", "-l", mountPoint).Run(); err != nil {
+			t.Logf("unmounting failed: %s", err)
 		}
-		unmount(mountPoint)
 	}()
-	if !test.WaitFor(mounted(mountPoint), 2*time.Second, 100*time.Millisecond) {
-		t.Fatalf("error waiting for %s to be mounted", mountPoint)
+
+	if !test.WaitFor(func() bool { return mounted(mountPoint) }, 5*time.Second, 100*time.Millisecond) {
+		t.Fatalf("timed out waiting for %s to be mounted", mountPoint)
 	}
 	fn(&mountEnv{
 		t:          t,
 		mountPoint: mountPoint,
-		process:    mount.Process,
-		world:      w,
 	})
 }
 
-func mounted(dir string) func() bool {
-	return func() bool {
-		out, err := exec.Command("df", dir).CombinedOutput()
-		if err != nil {
-			return false
-		}
-		return strings.Contains(string(out), "pk-fuse") && strings.Contains(string(out), dir)
+func mounted(dir string) bool {
+	out, err := exec.Command("df", dir).CombinedOutput()
+	if err != nil {
+		return false
 	}
-}
-
-func unmount(point string) error {
-	errc := make(chan error, 1)
-	go func() {
-		var cmd *exec.Cmd
-		switch runtime.GOOS {
-		case "darwin":
-			cmd = exec.Command("/usr/sbin/diskutil", "umount", "force", point)
-		case "linux":
-			cmd = exec.Command("fusermount", "-u", point)
-		}
-
-		if err := cmd.Run(); err == nil {
-			if err = exec.Command("umount", point).Run(); err == nil {
-				errc <- err
-			}
-		}
-	}()
-	select {
-	case <-time.After(1 * time.Second):
-		return errors.New("umount timeout")
-	case err := <-errc:
-		return err
-	}
+	return strings.Contains(string(out), "pk-fuse") && strings.Contains(string(out), dir)
 }
 
 // https://cs.opensource.google/go/go/+/refs/tags/go1.18.3:src/os/file_posix.go;drc=635b1244aa7671bcd665613680f527452cac7555;l=243

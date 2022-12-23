@@ -51,7 +51,6 @@ func TestCamputFIFO(t *testing.T) {
 	fifo := mkTmpFIFO(t)
 
 	// Can we successfully upload a fifo?
-	w := test.GetWorld(t)
 	out := test.MustRunCmd(t, w.Cmd("pk-put", "file", fifo))
 
 	br := strings.Split(out, "\n")[0]
@@ -82,7 +81,6 @@ func TestCamputSocket(t *testing.T) {
 	socket := mkTmpSocket(t)
 
 	// Can we successfully upload a socket?
-	w := test.GetWorld(t)
 	out := test.MustRunCmd(t, w.Cmd("pk-put", "file", socket))
 
 	br := strings.Split(out, "\n")[0]
@@ -92,7 +90,6 @@ func TestCamputSocket(t *testing.T) {
 
 // Test that pk-put twice on the same file only uploads once.
 func TestCamputUploadOnce(t *testing.T) {
-	w := test.GetWorld(t)
 
 	pkputCmd := func() *exec.Cmd {
 		// Use --contents_only because if test is run from devcam,

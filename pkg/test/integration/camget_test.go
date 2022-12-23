@@ -32,8 +32,6 @@ import (
 
 // Test that `pk-get -o' can restore a symlink correctly.
 func TestCamgetSymlink(t *testing.T) {
-	w := test.GetWorld(t)
-
 	srcDir := t.TempDir()
 
 	targetBase := "a"
@@ -99,7 +97,6 @@ func TestCamgetFIFO(t *testing.T) {
 	fifo := mkTmpFIFO(t)
 
 	// Upload the fifo
-	w := test.GetWorld(t)
 	out := test.MustRunCmd(t, w.Cmd("pk-put", "file", fifo))
 	br := strings.Split(out, "\n")[0]
 
@@ -127,7 +124,6 @@ func TestCamgetSocket(t *testing.T) {
 	socket := mkTmpSocket(t)
 
 	// Upload the socket
-	w := test.GetWorld(t)
 	out := test.MustRunCmd(t, w.Cmd("pk-put", "file", socket))
 	br := strings.Split(out, "\n")[0]
 
@@ -169,7 +165,6 @@ func TestCamgetFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := test.GetWorld(t)
 	out := test.MustRunCmd(t, w.Cmd("pk-put", "file", filename))
 
 	br := strings.Split(out, "\n")[0]

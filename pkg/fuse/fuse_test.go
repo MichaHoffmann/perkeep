@@ -46,9 +46,22 @@ import (
 var w *test.World
 
 func TestMain(m *testing.M) {
-	var err error
-
 	flag.Parse()
+
+	if testing.Short() {
+		log.Println("Skipping FUSE tests in short mode")
+		os.Exit(0)
+	}
+	if os.Getenv("SKIP_FUSE_TESTS") != "" {
+		log.Println("Skipping FUSE tests because 'SKIP_FUSE_TESTS' is set")
+		os.Exit(0)
+	}
+	if !(runtime.GOOS == "darwin" || runtime.GOOS == "linux") {
+		log.Printf("Skipping FUSE tests on %s", runtime.GOOS)
+		os.Exit(0)
+	}
+
+	var err error
 	if w, err = test.NewWorld(); err != nil {
 		log.Fatal(err)
 	}
@@ -64,13 +77,10 @@ func TestPosix(t *testing.T) {
 	for k := range map[string]func(*testing.T, string){
 		"AppendWrite":          posixtest.AppendWrite,
 		"DirectIO":             posixtest.DirectIO,
-		"ReadDir":              posixtest.ReadDir,
 		"ReadDirPicksUpCreate": posixtest.ReadDirPicksUpCreate,
 		"FdLeak":               posixtest.FdLeak,
-		"MkdirRmdir":           posixtest.MkdirRmdir,
 		"RenameOpenDir":        posixtest.RenameOpenDir,
 		"SymlinkReadlink":      posixtest.SymlinkReadlink,
-		//"DirSeek":            posixtest.DirSeek,
 	} {
 		f := posixtest.All[k]
 		n := k
@@ -84,40 +94,40 @@ func TestPosix(t *testing.T) {
 
 func TestTruncateFile(t *testing.T) {
 	inEmptyRoot(t, func(env *mountEnv, rootDir string) {
-		tmp, err := ioutil.TempFile(rootDir, "camlitest")
+		f, err := ioutil.TempFile(rootDir, "camlitest")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err = tmp.WriteString("hello world from test"); err != nil {
+		if _, err = f.WriteString("hello world from test"); err != nil {
 			t.Fatal(err)
 		}
-		if err = tmp.Close(); err != nil {
-			t.Fatal(err)
+		if err = f.Close(); err != nil {
+			t.Logf("error closing file %s: %s", f.Name(), err)
 		}
 
 		const truncateAt = 6
 
-		tmp, err = os.OpenFile(tmp.Name(), os.O_RDWR, 0644)
+		f, err = os.OpenFile(f.Name(), os.O_RDWR, 0644)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = tmp.Truncate(truncateAt); err != nil {
+		if err = f.Truncate(truncateAt); err != nil {
 			t.Fatal(err)
 		}
-		if stat, err := tmp.Stat(); err != nil {
+		if stat, err := f.Stat(); err != nil {
 			t.Fatal(err)
 		} else if stat.Size() != truncateAt {
 			t.Fatalf("file size = %d, want %d", stat.Size(), truncateAt)
 		}
 
-		if _, err = tmp.WriteAt([]byte("perkeep"), truncateAt); err != nil {
+		if _, err = f.WriteAt([]byte("perkeep"), truncateAt); err != nil {
 			t.Fatal(err)
 		}
-		if err = tmp.Close(); err != nil {
-			t.Fatal(err)
+		if err = f.Close(); err != nil {
+			t.Logf("error closing file %s: %s", f.Name(), err)
 		}
 
-		got, err := ioutil.ReadFile(tmp.Name())
+		got, err := ioutil.ReadFile(f.Name())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -132,29 +142,28 @@ func TestMutable(t *testing.T) {
 		filename := filepath.Join(rootDir, "x")
 		f, err := os.Create(filename)
 		if err != nil {
-			t.Fatalf("Create: %v", err)
+			t.Fatalf("error creating: %v", err)
 		}
 		if err := f.Close(); err != nil {
-			t.Fatalf("Close: %v", err)
+			t.Logf("error closing file %s: %s", f.Name(), err)
 		}
 		fi, err := os.Stat(filename)
 		if err != nil {
-			t.Errorf("Stat error: %v", err)
+			t.Errorf("stat error: %v", err)
 		} else if !fi.Mode().IsRegular() || fi.Size() != 0 {
-			t.Errorf("Stat of roots/r/x = %v size %d; want a %d byte regular file", fi.Mode(), fi.Size(), 0)
+			t.Errorf("stat of roots/r/x = %v size %d; want a %d byte regular file", fi.Mode(), fi.Size(), 0)
 		}
 
 		for _, str := range []string{"foo, ", "bar\n", "another line.\n"} {
 			f, err = os.OpenFile(filename, os.O_WRONLY|os.O_APPEND, 0644)
 			if err != nil {
-				t.Fatalf("OpenFile: %v", err)
+				t.Fatalf("error opening file: %v", err)
 			}
 			if _, err := f.Write([]byte(str)); err != nil {
-				t.Logf("Error with append: %v", err)
-				t.Fatalf("Error appending %q to %s: %v", str, filename, err)
+				t.Fatalf("error appending %q to %s: %v", str, filename, err)
 			}
 			if err := f.Close(); err != nil {
-				t.Fatal(err)
+				t.Logf("error closing file %s: %s", f.Name(), err)
 			}
 		}
 		slurp, err := ioutil.ReadFile(filename)
@@ -165,9 +174,9 @@ func TestMutable(t *testing.T) {
 		const want = "foo, bar\nanother line.\n"
 		fi, err = os.Stat(filename)
 		if err != nil {
-			t.Errorf("Stat error: %v", err)
+			t.Errorf("stat error: %v", err)
 		} else if !fi.Mode().IsRegular() || fi.Size() != int64(len(want)) {
-			t.Errorf("Stat of roots/r/x = %v size %d; want a %d byte regular file", fi.Mode(), fi.Size(), len(want))
+			t.Errorf("stat of roots/r/x = %v size %d; want a %d byte regular file", fi.Mode(), fi.Size(), len(want))
 		}
 		if got := string(slurp); got != want {
 			t.Fatalf("contents = %q; want %q", got, want)
@@ -288,28 +297,28 @@ func TestDifferentWriteTypes(t *testing.T) {
 		for _, wr := range writes {
 			f, err := os.OpenFile(filename, wr.flag, 0644)
 			if err != nil {
-				t.Fatalf("%s: OpenFile: %v", wr.name, err)
+				t.Fatalf("error opening file %s: %v", wr.name, err)
 			}
 			if wr.write != nil {
 				if n, err := f.Write(wr.write); err != nil || n != len(wr.write) {
-					t.Fatalf("%s: Write = (%v, %v); want (%d, nil)", wr.name, n, err, len(wr.write))
+					t.Fatalf("error writing %s: (%v, %v); want (%d, nil)", wr.name, n, err, len(wr.write))
 				}
 			}
 			if wr.writeAt != nil {
 				if n, err := f.WriteAt(wr.writeAt, wr.writePos); err != nil || n != len(wr.writeAt) {
-					t.Fatalf("%s: WriteAt = (%v, %v); want (%d, nil)", wr.name, n, err, len(wr.writeAt))
+					t.Fatalf("error writing at %s: (%v, %v); want (%d, nil)", wr.name, n, err, len(wr.writeAt))
 				}
 			}
 			if err := f.Close(); err != nil {
-				t.Fatalf("%s: Close: %v", wr.name, err)
+				t.Logf("error closing file %s: %s", f.Name(), err)
 			}
 
 			slurp, err := ioutil.ReadFile(filename)
 			if err != nil {
-				t.Fatalf("%s: Slurp: %v", wr.name, err)
+				t.Fatalf("error reading file %s: %v", wr.name, err)
 			}
 			if got := shortenString(string(slurp)); got != wr.want {
-				t.Fatalf("%s: afterwards, file = %q; want %q", wr.name, got, wr.want)
+				t.Fatalf("file %s: %q; want %q", wr.name, got, wr.want)
 			}
 
 		}
@@ -403,11 +412,9 @@ func TestSymlink(t *testing.T) {
 		if err := os.Symlink(target, link); err != nil {
 			t.Fatalf("Symlink: %v", err)
 		}
-		t.Logf("Checking in first process...")
 		check()
 	})
 	pkmountTest(t, func(env *mountEnv) {
-		t.Logf("Checking in second process...")
 		link = env.mountPoint + suffix
 		check()
 	})
@@ -478,7 +485,7 @@ func TestFinderCopy(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := f.Close(); err != nil {
-			t.Fatal(err)
+			t.Logf("error closing file %s: %s", f.Name(), err)
 		}
 
 		cmd := exec.Command("osascript")
@@ -539,8 +546,6 @@ func inEmptyRoot(t *testing.T, fn func(env *mountEnv, dir string)) {
 }
 
 func pkmountTest(t *testing.T, fn func(env *mountEnv)) {
-	condSkip(t)
-
 	if err := w.Ping(); err != nil {
 		t.Fatal(err)
 	}
@@ -613,15 +618,6 @@ func unmount(point string) error {
 		return errors.New("umount timeout")
 	case err := <-errc:
 		return err
-	}
-}
-
-func condSkip(t *testing.T) {
-	if os.Getenv("SKIP_FUSE_TESTS") != "" {
-		t.Skip("skipping fuse tests because SKIP_FUSE_TESTS is set")
-	}
-	if !(runtime.GOOS == "darwin" || runtime.GOOS == "linux") {
-		t.Skipf("Skipping test on GOOS %q", runtime.GOOS)
 	}
 }
 

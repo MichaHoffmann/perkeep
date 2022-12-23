@@ -32,7 +32,6 @@ import (
 	"syscall"
 
 	"go4.org/syncutil"
-	"perkeep.org/internal/lru"
 	"perkeep.org/pkg/blob"
 	"perkeep.org/pkg/client"
 	"perkeep.org/pkg/schema"
@@ -47,14 +46,13 @@ var (
 )
 
 type PkFS struct {
-	client       *client.Client
-	blobToSchema *lru.Cache
+	// TODO: retry retriable networking issues
+	client *client.Client
 }
 
 func NewPkFS(client *client.Client) *PkFS {
 	return &PkFS{
-		client:       client,
-		blobToSchema: lru.New(1024),
+		client: client,
 	}
 }
 
@@ -63,11 +61,6 @@ func (pk *PkFS) Root() fs.InodeEmbedder {
 }
 
 func (pk *PkFS) fetchSchemaMeta(ctx context.Context, br blob.Ref) (*schema.Blob, error) {
-	blobStr := br.String()
-	if blob, ok := pk.blobToSchema.Get(blobStr); ok {
-		return blob.(*schema.Blob), nil
-	}
-
 	rc, _, err := pk.client.Fetch(ctx, br)
 	if err != nil {
 		return nil, err
@@ -80,7 +73,6 @@ func (pk *PkFS) fetchSchemaMeta(ctx context.Context, br blob.Ref) (*schema.Blob,
 	if blob.Type() == "" {
 		return nil, os.ErrInvalid
 	}
-	pk.blobToSchema.Add(blobStr, blob)
 	return blob, nil
 
 }
@@ -92,7 +84,6 @@ type pkNode struct {
 	br blob.Ref
 
 	name string
-	attr fuse.Attr
 
 	mu sync.RWMutex
 
@@ -140,15 +131,20 @@ var (
 	_ = (fs.NodeRenamer)((*pkNode)(nil))
 )
 
+// For Readdir and Lookup
+func describeRequest(br blob.Ref) *search.DescribeRequest {
+	return &search.DescribeRequest{
+		Depth:   2,
+		BlobRef: br,
+		Rules:   []*search.DescribeRule{{Attrs: []string{"camliPath:*", "camliContent"}}},
+	}
+}
+
 func (n *pkNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	res, err := n.pk.client.Describe(ctx, &search.DescribeRequest{
-		Depth:   2,
-		BlobRef: n.br,
-		Rules:   []*search.DescribeRule{{Attrs: []string{"camliPath:*", "camliContent"}}},
-	})
+	res, err := n.pk.client.Describe(ctx, describeRequest(n.br))
 	if err != nil {
 		return nil, errnoFromErr(err)
 	}
@@ -194,15 +190,10 @@ func (n *pkNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	defer n.mu.Unlock()
 
 	if child := n.GetChild(name); child != nil {
-		out.Attr = child.Operations().(*pkNode).attr
 		return child, 0
 	}
 
-	res, err := n.pk.client.Describe(ctx, &search.DescribeRequest{
-		Depth:   2,
-		BlobRef: n.br,
-		Rules:   []*search.DescribeRule{{Attrs: []string{"camliPath:*", "camliContent"}}},
-	})
+	res, err := n.pk.client.Describe(ctx, describeRequest(n.br))
 	if err != nil {
 		return nil, errnoFromErr(err)
 	}
@@ -222,10 +213,8 @@ func (n *pkNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 		pk:   n.pk,
 		br:   mdb.BlobRef,
 		name: name,
-		attr: fuse.Attr{},
 		refs: 1,
 	}
-	child.attr.Nlink = 1
 
 	var mode uint32
 	switch {
@@ -236,7 +225,7 @@ func (n *pkNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 		if err != nil {
 			return nil, errnoFromErr(err)
 		}
-		child.attr.Size = uint64(sc.PartsSize())
+		child.content = make([]byte, sc.PartsSize())
 	case isDir(mdb.Permanode.Attr):
 		mode = syscall.S_IFDIR
 	case isSymlink(mdb.Permanode.Attr):
@@ -245,6 +234,7 @@ func (n *pkNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	default:
 		return nil, syscall.EIO
 	}
+	child.populateAttrOut(&out.Attr)
 
 	return n.NewPersistentInode(ctx, child, fs.StableAttr{Mode: mode, Ino: child.br.Sum64()}), 0
 }
@@ -278,22 +268,18 @@ func (n *pkNode) Create(ctx context.Context, name string, flags uint32, mode uin
 		return nil, nil, 0, errnoFromErr(err)
 	}
 
-	attr := fuse.Attr{}
-	attr.Mode = mode
-	attr.Nlink = 1
-	out.Attr = attr
-
 	child := &pkNode{
 		pk:   n.pk,
 		br:   pr.BlobRef,
 		name: name,
-		attr: attr,
 		refs: 1,
 	}
 	fh := &pkFileView{
 		n:     child,
 		flags: flags,
 	}
+	child.populateAttrOut(&out.Attr)
+
 	return n.NewPersistentInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG, Ino: child.br.Sum64()}), fh, fuse.FOPEN_DIRECT_IO, 0
 }
 
@@ -305,12 +291,10 @@ func (n *pkNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 		if n.cbr.Valid() {
 			r, err := schema.NewFileReader(ctx, n.pk.client, n.cbr)
 			if err != nil {
-				logger.Println(err)
 				return nil, 0, errnoFromErr(err)
 			}
 			content, err := io.ReadAll(r)
 			if err != nil {
-				logger.Println(err)
 				return nil, 0, errnoFromErr(err)
 			}
 			n.content = content
@@ -369,17 +353,14 @@ func (n *pkNode) Symlink(ctx context.Context, target, name string, out *fuse.Ent
 		return nil, errnoFromErr(err)
 	}
 
-	attr := fuse.Attr{}
-	attr.Nlink = 1
-	out.Attr = attr
-
 	child := &pkNode{
 		pk:     n.pk,
 		br:     pr.BlobRef,
 		name:   name,
-		attr:   attr,
 		target: []byte(target),
 	}
+	child.populateAttrOut(&out.Attr)
+
 	return n.NewPersistentInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFLNK, Ino: child.br.Sum64()}), 0
 }
 
@@ -390,26 +371,14 @@ func (n *pkNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 	return n.target, 0
 }
 
-// TODO
 func (n *pkNode) Getattr(ctx context.Context, _ fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	out.Attr = n.attr
-	out.Size = uint64(len(n.content))
-	out.Uid = uint32(os.Getuid())
-	out.Gid = uint32(os.Getgid())
-
-	switch n.Mode() {
-	case syscall.S_IFREG, syscall.S_IFLNK:
-		out.Mode = 0600
-	case syscall.S_IFDIR:
-		out.Mode = 0700
-	}
+	n.populateAttrOutUnlocked(&out.Attr)
 	return 0
 }
 
-// TODO
 func (n *pkNode) Setattr(ctx context.Context, _ fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -417,8 +386,7 @@ func (n *pkNode) Setattr(ctx context.Context, _ fs.FileHandle, in *fuse.SetAttrI
 	if sz, ok := in.GetSize(); ok {
 		n.resizeUnlocked(sz)
 	}
-	out.Attr = n.attr
-	out.Size = uint64(len(n.content))
+	n.populateAttrOutUnlocked(&out.Attr)
 	return 0
 }
 
@@ -458,16 +426,13 @@ func (n *pkNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 		return nil, errnoFromErr(err)
 	}
 
-	attr := fuse.Attr{}
-	attr.Nlink = 1
-	out.Attr = attr
-
 	child := &pkNode{
 		pk:   n.pk,
 		br:   pr.BlobRef,
 		name: name,
-		attr: attr,
 	}
+	child.populateAttrOut(&out.Attr)
+
 	return n.NewPersistentInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: child.br.Sum64()}), 0
 }
 
@@ -545,7 +510,6 @@ func (fh *pkFileView) Write(_ context.Context, buf []byte, off int64) (uint32, s
 	if fh.flags&uint32(os.O_RDONLY) > 0 {
 		return 0, syscall.EPERM
 	}
-
 	if fh.flags&uint32(os.O_APPEND) > 0 {
 		off = int64(len(fh.n.content))
 	}
@@ -604,10 +568,31 @@ func (n *pkNode) resizeUnlocked(sz uint64) {
 	}
 }
 
+func (n *pkNode) populateAttrOutUnlocked(out *fuse.Attr) {
+	out.Size = uint64(len(n.content))
+	out.Uid = uint32(os.Getuid())
+	out.Gid = uint32(os.Getgid())
+
+	switch n.Mode() {
+	case syscall.S_IFREG, syscall.S_IFLNK:
+		out.Mode = 0600
+	case syscall.S_IFDIR:
+		out.Mode = 0700
+	}
+}
+
+func (n *pkNode) populateAttrOut(out *fuse.Attr) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.populateAttrOutUnlocked(out)
+}
+
 func errnoFromErr(err error) syscall.Errno {
 	if err == nil {
 		return 0
 	}
+	logger.Println("perkeep error: ", err)
 	if errors.Is(err, context.Canceled) {
 		return syscall.EINTR
 	} else {

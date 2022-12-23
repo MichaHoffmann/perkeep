@@ -23,6 +23,8 @@ require (
 	github.com/gopherjs/jquery v0.0.0-20180404123100-3ba2b901425e
 	github.com/goplusjs/gopherjs v1.1.6
 	github.com/gorilla/websocket v1.4.2
+	github.com/hanwen/go-fuse v1.0.0 // indirect
+	github.com/hanwen/go-fuse/v2 v2.2.0 // indirect
 	github.com/hjfreyer/taglib-go v0.0.0-20151027170453-0ef8bba9c41b
 	github.com/jonas-p/go-shp v0.1.1 // indirect
 	github.com/lib/pq v1.10.2

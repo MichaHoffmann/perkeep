@@ -118,6 +118,7 @@ func (w *World) Build() error {
 				"perkeep.org/cmd/pk-get",
 				"perkeep.org/cmd/pk-put",
 				"perkeep.org/cmd/pk-mount",
+				"perkeep.org/cmd/pk-mountng",
 			}, ","))
 		if testing.Verbose() {
 			// TODO(mpl): do the same when -verbose with devcam test. Even better: see if testing.Verbose
@@ -306,11 +307,11 @@ func (w *World) CmdWithEnv(binary string, env []string, args ...string) *exec.Cm
 	}
 	var cmd *exec.Cmd
 	switch binary {
-	case "pk-get", "pk-put", "pk", "pk-mount":
+	case "pk-get", "pk-put", "pk", "pk-mount", "pk-mountng":
 		// TODO(mpl): lift the pk-put restriction when we have a unified logging mechanism
 		if binary == "pk-put" && !hasVerbose() {
 			// pk-put and pk are the only ones to have a -verbose flag through cmdmain
-			// but pk is never used. (and pk-mount does not even have a -verbose).
+			// but pk is never used.
 			args = append([]string{"-verbose"}, args...)
 		}
 		binary := w.lookPathGobin(binary)

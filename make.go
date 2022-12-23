@@ -120,6 +120,7 @@ func main() {
 		switch *buildOS {
 		case "linux", "darwin":
 			targs = append(targs, "perkeep.org/cmd/pk-mount")
+			targs = append(targs, "perkeep.org/cmd/pk-mountng")
 		}
 	default:
 		if *website {

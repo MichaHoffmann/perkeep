@@ -73,7 +73,13 @@ func GetRequiredChildPathObj(parent *importer.Object, path string) (*importer.Ob
 func ImporterTest(t *testing.T, importerName string, transport http.RoundTripper, fn func(*importer.RunContext)) {
 	const importerPrefix = "/importer/"
 
-	w := test.GetWorld(t)
+	w, err := test.NewWorld()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Start(); err != nil {
+		t.Fatal(err)
+	}
 	defer w.Stop()
 	baseURL := w.ServerBaseURL()
 

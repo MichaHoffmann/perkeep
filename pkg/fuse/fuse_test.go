@@ -501,6 +501,9 @@ func pkmountTest(t *testing.T, fn func(env *mountEnv)) {
 		if err := exec.Command("umount", "-l", mountPoint).Run(); err != nil {
 			t.Logf("unmounting failed: %s", err)
 		}
+		if !test.WaitFor(func() bool { return !mounted(mountPoint) }, 5*time.Second, 100*time.Millisecond) {
+			t.Fatalf("timed out waiting for %s to be unmounted", mountPoint)
+		}
 	}()
 
 	if !test.WaitFor(func() bool { return mounted(mountPoint) }, 5*time.Second, 100*time.Millisecond) {
@@ -536,6 +539,7 @@ type testLogWriter struct {
 }
 
 func (tl testLogWriter) Write(p []byte) (n int, err error) {
+	tl.t.Helper()
 	tl.t.Log(strings.TrimSpace(string(p)))
 	return len(p), nil
 }

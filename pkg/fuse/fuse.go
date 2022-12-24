@@ -23,7 +23,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"log"
 	"net/url"
 	"os"
@@ -89,11 +88,12 @@ type pkNode struct {
 	mu sync.RWMutex
 
 	// file
-	cbr     blob.Ref
-	content []byte
-	refs    uint
-	lw      time.Time
-	lf      time.Time
+	cbr blob.Ref
+	f   *os.File
+	sz  uint64
+	rf  uint
+	lw  time.Time
+	lf  time.Time
 
 	// symlink
 	target []byte
@@ -216,7 +216,7 @@ func (n *pkNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 		pk:   n.pk,
 		br:   mdb.BlobRef,
 		name: name,
-		refs: 1,
+		rf:   1,
 	}
 
 	var mode uint32
@@ -228,7 +228,7 @@ func (n *pkNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 		if err != nil {
 			return nil, errnoFromErr(err)
 		}
-		child.content = make([]byte, sc.PartsSize())
+		child.sz = uint64(sc.PartsSize())
 	case isDir(mdb.Permanode.Attr):
 		mode = syscall.S_IFDIR
 	case isSymlink(mdb.Permanode.Attr):
@@ -245,6 +245,11 @@ func (n *pkNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 func (n *pkNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+
+	f, err := os.CreateTemp(os.TempDir(), "pkmnt")
+	if err != nil {
+		return nil, nil, 0, syscall.EIO
+	}
 
 	pr, err := n.pk.client.UploadNewPermanode(ctx)
 	if err != nil {
@@ -275,9 +280,11 @@ func (n *pkNode) Create(ctx context.Context, name string, flags uint32, mode uin
 		pk:   n.pk,
 		br:   pr.BlobRef,
 		name: name,
-		refs: 1,
+		f:    f,
+		sz:   0,
+		rf:   1,
 	}
-	fh := &pkFileView{
+	fh := &pkFileHandle{
 		n:     child,
 		flags: flags,
 	}
@@ -290,21 +297,24 @@ func (n *pkNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	if n.content == nil {
+	if n.f == nil {
 		if n.cbr.Valid() {
+			f, err := os.CreateTemp(os.TempDir(), "pkmnt")
+			if err != nil {
+				return nil, 0, syscall.EIO
+			}
 			r, err := schema.NewFileReader(ctx, n.pk.client, n.cbr)
 			if err != nil {
 				return nil, 0, errnoFromErr(err)
 			}
-			content, err := io.ReadAll(r)
-			if err != nil {
-				return nil, 0, errnoFromErr(err)
+			if _, err := f.ReadFrom(r); err != nil {
+				return nil, 0, syscall.EIO
 			}
-			n.content = content
+			n.f = f
 		}
 	}
-	n.refs++
-	return &pkFileView{n: n, flags: flags}, fuse.FOPEN_DIRECT_IO, 0
+	n.rf++
+	return &pkFileHandle{n: n, flags: flags}, fuse.FOPEN_DIRECT_IO, 0
 }
 
 func (n *pkNode) Unlink(ctx context.Context, name string) syscall.Errno {
@@ -387,7 +397,12 @@ func (n *pkNode) Setattr(ctx context.Context, _ fs.FileHandle, in *fuse.SetAttrI
 	defer n.mu.Unlock()
 
 	if sz, ok := in.GetSize(); ok {
-		n.resizeUnlocked(sz)
+		if n.f != nil {
+			if err := n.f.Truncate(int64(sz)); err != nil {
+				return syscall.EIO
+			}
+		}
+		n.sz = sz
 	}
 	n.populateAttrOutUnlocked(&out.Attr)
 	n.lw = time.Now()
@@ -480,19 +495,20 @@ func (n *pkNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 	return 0
 }
 
-type pkFileView struct {
+type pkFileHandle struct {
 	n *pkNode
 
-	flags uint32
+	closed bool
+	flags  uint32
 }
 
 var (
-	_ = (fs.FileReader)((*pkFileView)(nil))
-	_ = (fs.FileWriter)((*pkFileView)(nil))
-	_ = (fs.FileFlusher)((*pkFileView)(nil))
+	_ = (fs.FileReader)((*pkFileHandle)(nil))
+	_ = (fs.FileWriter)((*pkFileHandle)(nil))
+	_ = (fs.FileFlusher)((*pkFileHandle)(nil))
 )
 
-func (fh *pkFileView) Read(_ context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+func (fh *pkFileHandle) Read(_ context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	fh.n.mu.Lock()
 	defer fh.n.mu.Unlock()
 
@@ -500,14 +516,10 @@ func (fh *pkFileView) Read(_ context.Context, dest []byte, off int64) (fuse.Read
 		return nil, syscall.EPERM
 	}
 
-	end := int(off) + len(dest)
-	if end > len(fh.n.content) {
-		end = len(fh.n.content)
-	}
-	return fuse.ReadResultData(fh.n.content[off:end]), 0
+	return fuse.ReadResultFd(fh.n.f.Fd(), off, len(dest)), 0
 }
 
-func (fh *pkFileView) Write(_ context.Context, buf []byte, off int64) (uint32, syscall.Errno) {
+func (fh *pkFileHandle) Write(_ context.Context, buf []byte, off int64) (uint32, syscall.Errno) {
 	fh.n.mu.Lock()
 	defer fh.n.mu.Unlock()
 
@@ -515,28 +527,51 @@ func (fh *pkFileView) Write(_ context.Context, buf []byte, off int64) (uint32, s
 		return 0, syscall.EPERM
 	}
 	if fh.flags&uint32(os.O_APPEND) > 0 {
-		off = int64(len(fh.n.content))
+		off = int64(fh.n.sz)
 	}
 
-	sz := int64(len(buf))
-	if off+sz > int64(len(fh.n.content)) {
-		fh.n.resizeUnlocked(uint64(off + sz))
+	n, err := fh.n.f.WriteAt(buf, off)
+	if err != nil {
+		return 0, syscall.EIO
 	}
-
-	copy(fh.n.content[off:], buf)
+	if pos := int64(len(buf)) + off; pos > int64(fh.n.sz) {
+		fh.n.sz = uint64(pos)
+	}
 	fh.n.lw = time.Now()
-	return uint32(sz), 0
+	return uint32(n), 0
 }
 
-func (fh *pkFileView) Flush(ctx context.Context) syscall.Errno {
+func (fh *pkFileHandle) Flush(ctx context.Context) syscall.Errno {
 	fh.n.mu.Lock()
 	defer fh.n.mu.Unlock()
 
+	// close of closed file
+	if fh.closed {
+		return syscall.EBADFD
+	}
+
+	defer func() {
+		fh.n.rf--
+		if fh.n.rf == 0 {
+			fh.n.f.Close()
+			os.Remove(fh.n.f.Name())
+			fh.n.f = nil
+		}
+		fh.n.lf = time.Now()
+		fh.closed = true
+	}()
+
+	// some handle was flushed after the last write already
+	// so we have no new content and can bail out early
 	if !fh.n.lw.IsZero() && fh.n.lw.Before(fh.n.lf) {
 		return 0
 	}
 
-	br, err := schema.WriteFileFromReader(ctx, fh.n.pk.client, fh.n.name, bytes.NewReader(fh.n.content))
+	if _, err := fh.n.f.Seek(0, 0); err != nil {
+		return syscall.EIO
+	}
+
+	br, err := schema.WriteFileFromReader(ctx, fh.n.pk.client, fh.n.name, fh.n.f)
 	if err != nil {
 		return errnoFromErr(err)
 	}
@@ -545,7 +580,6 @@ func (fh *pkFileView) Flush(ctx context.Context) syscall.Errno {
 		return errnoFromErr(err)
 	}
 	fh.n.cbr = br
-	fh.n.lf = time.Now()
 	return 0
 }
 
@@ -553,18 +587,8 @@ func (n *pkNode) Fsync(ctx context.Context, f fs.FileHandle, flags uint32) sysca
 	return 0
 }
 
-func (n *pkNode) resizeUnlocked(sz uint64) {
-	if sz > uint64(cap(n.content)) {
-		buf := make([]byte, sz)
-		copy(buf, n.content)
-		n.content = buf
-	} else {
-		n.content = n.content[:sz]
-	}
-}
-
 func (n *pkNode) populateAttrOutUnlocked(out *fuse.Attr) {
-	out.Size = uint64(len(n.content))
+	out.Size = uint64(n.sz)
 	out.Uid = uint32(os.Getuid())
 	out.Gid = uint32(os.Getgid())
 	out.Nlink = 1

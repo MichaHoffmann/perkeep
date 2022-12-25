@@ -22,6 +22,7 @@ package fuse // import "perkeep.org/pkg/fuse"
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"log"
 	"net/url"
@@ -85,7 +86,8 @@ type pkNode struct {
 
 	name string
 
-	mu sync.RWMutex
+	mu     sync.RWMutex
+	xattrs map[string][]byte
 
 	// file
 	cbr blob.Ref
@@ -98,6 +100,8 @@ type pkNode struct {
 	// symlink
 	target []byte
 }
+
+const xattrPrefix = "xattr:"
 
 func isDir(attr url.Values) bool {
 	if attr.Get("camliNodeType") == string(schema.TypeDirectory) {
@@ -132,6 +136,10 @@ var (
 	_ = (fs.NodeSetattrer)((*pkNode)(nil))
 	_ = (fs.NodeMkdirer)((*pkNode)(nil))
 	_ = (fs.NodeRenamer)((*pkNode)(nil))
+	_ = (fs.NodeGetxattrer)((*pkNode)(nil))
+	_ = (fs.NodeSetxattrer)((*pkNode)(nil))
+	_ = (fs.NodeListxattrer)((*pkNode)(nil))
+	_ = (fs.NodeRemovexattrer)((*pkNode)(nil))
 )
 
 // For Readdir and Lookup
@@ -213,10 +221,11 @@ func (n *pkNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	mdb := res.Meta.Get(mb)
 
 	child := &pkNode{
-		pk:   n.pk,
-		br:   mdb.BlobRef,
-		name: name,
-		rf:   1,
+		pk:     n.pk,
+		br:     mdb.BlobRef,
+		name:   name,
+		rf:     1,
+		xattrs: make(map[string][]byte),
 	}
 
 	var mode uint32
@@ -237,8 +246,19 @@ func (n *pkNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	default:
 		return nil, syscall.EIO
 	}
-	child.populateAttrOut(&out.Attr)
 
+	for k, v := range mdb.Permanode.Attr {
+		if strings.HasPrefix(k, xattrPrefix) {
+			name := k[len(xattrPrefix):]
+			val, err := base64.StdEncoding.DecodeString(v[0])
+			if err != nil {
+				continue
+			}
+			(child.xattrs)[name] = val
+		}
+	}
+
+	child.populateAttrOut(&out.Attr)
 	return n.NewInode(ctx, child, fs.StableAttr{Mode: mode, Ino: child.br.Sum64()}), 0
 }
 
@@ -277,12 +297,13 @@ func (n *pkNode) Create(ctx context.Context, name string, flags uint32, mode uin
 	}
 
 	child := &pkNode{
-		pk:   n.pk,
-		br:   pr.BlobRef,
-		name: name,
-		f:    f,
-		sz:   0,
-		rf:   1,
+		pk:     n.pk,
+		br:     pr.BlobRef,
+		name:   name,
+		xattrs: make(map[string][]byte),
+		f:      f,
+		sz:     0,
+		rf:     1,
 	}
 	fh := &pkFileHandle{
 		n:     child,
@@ -370,6 +391,7 @@ func (n *pkNode) Symlink(ctx context.Context, target, name string, out *fuse.Ent
 		pk:     n.pk,
 		br:     pr.BlobRef,
 		name:   name,
+		xattrs: make(map[string][]byte),
 		target: []byte(target),
 	}
 	child.populateAttrOut(&out.Attr)
@@ -406,6 +428,66 @@ func (n *pkNode) Setattr(ctx context.Context, _ fs.FileHandle, in *fuse.SetAttrI
 	}
 	n.populateAttrOutUnlocked(&out.Attr)
 	n.lw = time.Now()
+	return 0
+}
+
+func (n *pkNode) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	val, found := (n.xattrs)[attr]
+	if !found {
+		return 0, syscall.ENODATA
+	}
+	if len(dest) < len(val) {
+		return uint32(len(val)), syscall.ERANGE
+	}
+	return uint32(copy(dest, val)), 0
+}
+
+func (n *pkNode) Setxattr(ctx context.Context, attr string, data []byte, flags uint32) syscall.Errno {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	b64data := base64.StdEncoding.EncodeToString(data)
+	claim := schema.NewSetAttributeClaim(n.br, xattrPrefix+attr, b64data)
+	if _, err := n.pk.client.UploadAndSignBlob(ctx, claim); err != nil {
+		return errnoFromErr(err)
+	}
+
+	val := make([]byte, len(data))
+	copy(val, data)
+	n.xattrs[attr] = val
+
+	return 0
+}
+
+func (n *pkNode) Listxattr(ctx context.Context, dest []byte) (uint32, syscall.Errno) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	val := make([]byte, 0)
+	for k := range n.xattrs {
+		val = append(val, k...)
+		val = append(val, '\x00')
+	}
+	if len(val) > len(dest) {
+		return uint32(len(val)), syscall.ERANGE
+	}
+
+	return uint32(copy(dest, val)), 0
+}
+
+func (n *pkNode) Removexattr(ctx context.Context, attr string) syscall.Errno {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	claim := schema.NewDelAttributeClaim(n.br, xattrPrefix+attr, "")
+	if _, err := n.pk.client.UploadAndSignBlob(ctx, claim); err != nil {
+		return errnoFromErr(err)
+	}
+	delete(n.xattrs, attr)
+
 	return 0
 }
 
@@ -446,9 +528,10 @@ func (n *pkNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 	}
 
 	child := &pkNode{
-		pk:   n.pk,
-		br:   pr.BlobRef,
-		name: name,
+		pk:     n.pk,
+		br:     pr.BlobRef,
+		name:   name,
+		xattrs: make(map[string][]byte),
 	}
 	child.populateAttrOut(&out.Attr)
 
@@ -591,7 +674,6 @@ func (n *pkNode) populateAttrOutUnlocked(out *fuse.Attr) {
 	out.Size = uint64(n.sz)
 	out.Uid = uint32(os.Getuid())
 	out.Gid = uint32(os.Getgid())
-	out.Nlink = 1
 
 	switch n.Mode() {
 	case syscall.S_IFREG, syscall.S_IFLNK:

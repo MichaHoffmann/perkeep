@@ -459,6 +459,135 @@ func TestSymlink(t *testing.T) {
 	})
 }
 
+func TestXattr(t *testing.T) {
+	setxattr := func(path, attr string, data []byte, flags int) error {
+		return ignoringEINTR(func() error {
+			return syscall.Setxattr(path, attr, data, flags)
+		})
+	}
+	getxattr := func(path, attr string, data []byte) (sz int, err error) {
+		err = ignoringEINTR(func() error {
+			sz, err = syscall.Getxattr(path, attr, data)
+			return err
+		})
+		return
+	}
+	listxattr := func(path string, data []byte) (sz int, err error) {
+		err = ignoringEINTR(func() error {
+			sz, err = syscall.Listxattr(path, data)
+			return err
+		})
+		return
+	}
+	removexattr := func(path, attr string) (err error) {
+		return ignoringEINTR(func() error {
+			return syscall.Removexattr(path, attr)
+		})
+	}
+	parseXattrList := func(from []byte) map[string]bool {
+		attrNames := bytes.Split(from, []byte{0})
+		m := map[string]bool{}
+		for _, nm := range attrNames {
+			if len(nm) == 0 {
+				continue
+			}
+			m[string(nm)] = true
+		}
+		return m
+	}
+
+	inEmptyRoot(t, func(env *mountEnv, rootDir string) {
+		name1 := filepath.Join(rootDir, "1")
+		attr1 := "attr1"
+		attr2 := "attr2"
+		attr3 := "attr3"
+
+		contents := []byte("Some file contents")
+		if err := ioutil.WriteFile(name1, contents, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		buf := make([]byte, 8192)
+		// list empty
+		n, err := listxattr(name1, buf)
+		if err != nil {
+			t.Errorf("error in initial listxattr: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("expected zero-length xattr list, got %q", buf[:n])
+		}
+
+		// get missing
+		n, err = getxattr(name1, attr1, buf)
+		if err == nil {
+			t.Errorf("expected error getting non-existent xattr, got %q", buf[:n])
+		}
+
+		// Set (two different attributes)
+		err = setxattr(name1, attr1, []byte("hello1"), 0)
+		if err != nil {
+			t.Fatalf("error setting xattr: %v", err)
+		}
+		err = setxattr(name1, attr2, []byte("hello2"), 0)
+		if err != nil {
+			t.Fatalf("error setting xattr: %v", err)
+		}
+		// Alternate value for first attribute
+		err = setxattr(name1, attr1, []byte("hello1a"), 0)
+		if err != nil {
+			t.Fatalf("error setting xattr: %v", err)
+		}
+
+		// list attrs
+		n, err = listxattr(name1, buf)
+		if err != nil {
+			t.Errorf("error in initial listxattr: %v", err)
+		}
+		m := parseXattrList(buf[:n])
+		if !(len(m) == 2 && m[attr1] && m[attr2]) {
+			t.Errorf("missing an attribute: %q", buf[:n])
+		}
+
+		// Remove attr
+		err = removexattr(name1, attr2)
+		if err != nil {
+			t.Errorf("failed to remove attr: %v", err)
+		}
+
+		// List attrs
+		n, err = listxattr(name1, buf)
+		if err != nil {
+			t.Errorf("error in initial listxattr: %v", err)
+		}
+		m = parseXattrList(buf[:n])
+		if !(len(m) == 1 && m[attr1]) {
+			t.Errorf("missing an attribute: %q", buf[:n])
+		}
+
+		// Get remaining attr
+		n, err = getxattr(name1, attr1, buf)
+		if err != nil {
+			t.Errorf("error getting attr1: %v", err)
+		}
+		if string(buf[:n]) != "hello1a" {
+			t.Logf("expected hello1a, got %q", buf[:n])
+		}
+
+		// check short buffer errors
+		buf = make([]byte, 4)
+		err = setxattr(name1, attr3, []byte("hello1a"), 0)
+		if err != nil {
+			t.Fatalf("error setting xattr: %v", err)
+		}
+		if _, err = getxattr(name1, attr3, buf); err != syscall.ERANGE {
+			t.Errorf("expected syscall.ERANGE on short buffer, got: %v", err)
+		}
+		if _, err = listxattr(name1, buf); err != syscall.ERANGE {
+			t.Errorf("expected syscall.ERANGE on short buffer, got: %v", err)
+		}
+	})
+}
+
 type mountEnv struct {
 	t          *testing.T
 	mountPoint string

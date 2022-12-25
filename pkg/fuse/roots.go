@@ -125,8 +125,10 @@ func (n *pkRootsNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 	}
 
 	return n.NewInode(ctx, &pkNode{
-		pk: n.pk,
-		br: blob,
+		pk:     n.pk,
+		br:     blob,
+		name:   name,
+		xattrs: make(map[string][]byte),
 	}, fs.StableAttr{
 		Mode: syscall.S_IFDIR,
 		Ino:  blob.Sum64(),
@@ -175,8 +177,10 @@ func (n *pkRootsNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 	}
 
 	return n.NewInode(ctx, &pkNode{
-		pk: n.pk,
-		br: pr.BlobRef,
+		pk:     n.pk,
+		br:     pr.BlobRef,
+		name:   name,
+		xattrs: make(map[string][]byte),
 	}, fs.StableAttr{
 		Mode: syscall.S_IFDIR,
 		Ino:  pr.BlobRef.Sum64(),

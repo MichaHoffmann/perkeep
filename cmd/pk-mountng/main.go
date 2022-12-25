@@ -42,7 +42,6 @@ func main() {
 			Debug:          *debug,
 			FsName:         "pk-fuse",
 			Name:           "pk",
-			DisableXAttrs:  true,
 			RememberInodes: true,
 		},
 		AttrTimeout:     attrTimeout,

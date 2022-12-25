@@ -37,6 +37,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"perkeep.org/pkg/test"
 
 	"github.com/hanwen/go-fuse/v2/posixtest"
@@ -573,7 +574,7 @@ func TestXattr(t *testing.T) {
 			t.Logf("expected hello1a, got %q", buf[:n])
 		}
 
-		// check short buffer errors
+		// Check short buffer errors
 		buf = make([]byte, 4)
 		err = setxattr(name1, attr3, []byte("hello1a"), 0)
 		if err != nil {
@@ -584,6 +585,14 @@ func TestXattr(t *testing.T) {
 		}
 		if _, err = listxattr(name1, buf); err != syscall.ERANGE {
 			t.Errorf("expected syscall.ERANGE on short buffer, got: %v", err)
+		}
+
+		// Check setxattr flag errors
+		if err = setxattr(name1, attr1, []byte("x"), unix.XATTR_CREATE); err != syscall.EEXIST {
+			t.Errorf("expected syscall.EEXIST when setting existing xattr with XATTR_CREATE flag, got: %v", err)
+		}
+		if err = setxattr(name1, "non-existing", []byte("x"), unix.XATTR_REPLACE); err != syscall.ENODATA {
+			t.Errorf("expected syscall.ENODATA when setting existing xattr with XATTR_REPLACE flag, got: %v", err)
 		}
 	})
 }

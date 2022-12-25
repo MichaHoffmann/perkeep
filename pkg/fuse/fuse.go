@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"go4.org/syncutil"
+	"golang.org/x/sys/unix"
 	"perkeep.org/pkg/blob"
 	"perkeep.org/pkg/client"
 	"perkeep.org/pkg/schema"
@@ -448,6 +449,14 @@ func (n *pkNode) Getxattr(ctx context.Context, attr string, dest []byte) (uint32
 func (n *pkNode) Setxattr(ctx context.Context, attr string, data []byte, flags uint32) syscall.Errno {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+
+	_, exists := n.xattrs[attr]
+	if exists && flags&unix.XATTR_CREATE > 0 {
+		return syscall.EEXIST
+	}
+	if !exists && flags&unix.XATTR_REPLACE > 0 {
+		return syscall.ENODATA
+	}
 
 	b64data := base64.StdEncoding.EncodeToString(data)
 	claim := schema.NewSetAttributeClaim(n.br, xattrPrefix+attr, b64data)
